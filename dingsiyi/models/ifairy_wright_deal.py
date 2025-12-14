@@ -10,8 +10,8 @@ def main():
     imag = "_imag"
     len = 5
     
-    input_path = "/home/wangyuxing/ifairy_models/model.safetensors"                   #需要转化的模型路径
-    output_path = "/home/wangyuxing/ifairy_models/intergrated_model.safetensors"        #转化后模型保存路径
+    input_path = "model.safetensors"                   #需要转化的模型路径
+    output_path = "intergrated_model.safetensors"        #转化后模型保存路径
     
     print(f"正在加载原始权重: {input_path}")
 
