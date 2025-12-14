@@ -2,7 +2,7 @@
 
 ## ComplexNetRMSNorm
 
-### weight : [weight_real,weight_image]
+### weight : [rms_real,rms_image]
 ### input and output:
 1. x_real,x_imag -> x_real,x_image
 2. x_real,x_imag,res_real,res_imag -> x_real,x_imag,res_real,res_imag
@@ -64,3 +64,41 @@ input_real,input_image -> q_real,q_imag,k_real,k_imag,v_real,v_imag
 ### achieve way
 
 input_real,input_image -> ComplexQKVLinear ->torch.chunk(Merged_qkv, 2, dim=0) ->split -> IntergrateRealAndImag -> q_real,q_imag,k_real,k_imag,v_real,v_imag
+
+
+
+## ComplexRelu2AndMul
+
+### weight: None
+
+### input and output:
+
+x_real,x_imag -> x_real,x_imag
+
+### achieve way
+```
+d = x_real.shape[-1] // 2
+gate_real,up_real = x_real.split([d, d], dim=-1)
+gate_imag,up_imag = x_imag.split([d, d], dim=-1)
+         
+gate_real,gate_imag = complex_relu2(gate_real,gate_imag)
+        
+output_real = gate_real * up_real + gate_imag * up_imag
+output_imag = gate_real * up_imag - gate_imag * up_real
+
+```
+
+### ComplexNetMLP
+
+### weight: [gate_weight_real,gate_weight_imag,up_weight_real,up_weight_imag] [rms_real,rms_image]  [weight_real,weight_imag] 
+
+### input and output：
+
+x_real,x_imag -> x_real,x_imag 
+
+### achieve way
+
+
+x_real,x_imag -> ComplexUpLinear -> ComplexRelu2AndMul -> ComplexLinear
+
+
