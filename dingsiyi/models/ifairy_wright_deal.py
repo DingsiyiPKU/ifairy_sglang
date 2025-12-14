@@ -35,9 +35,9 @@ def main():
                 
                 else:
                     imag_tensor = state_dict[imag_name]
+                #weight_real,weight_imag,weight
                 
-                
-                
+                # [output dim,input dim]
                     complex_tensor = torch.cat([real_tensor, imag_tensor], dim=0)
                 
                     new_state_dict[base_name] = complex_tensor
