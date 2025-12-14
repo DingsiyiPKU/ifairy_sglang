@@ -1,3 +1,4 @@
-模型在model文件夹下
-bitnet sglang基本完整
-ifairy sglang还需要写一个将实部参数和虚部绑定的块
+模型在model文件夹下  
+bitnet sglang
+iFairy.py
+ifairy_wright_deal.py 还将实部参数和虚部打包绑定的块
