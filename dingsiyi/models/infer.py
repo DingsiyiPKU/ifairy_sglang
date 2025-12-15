@@ -1,54 +1,69 @@
-import os
-import torch
-from safetensors.torch import load_file
-from transformers import AutoConfig
+import lm_eval
+from lm_eval import utils
+import json
 
-# 假设 qwen2.py 在同一个目录下
-from  bitnet_sglang import BitNetForCausalLM
+# ---------------- 配置区域 ----------------
 
-def load_hf_weights_into_sglang_model(model_path: str):
+# 1. 任务列表
 
+TASKS = ["gsm8k", "arc_easy"] 
+
+# 2. SGLang Server 的地址
+SERVER_URL = "http://localhost:30000/v1"
+
+# 3. 模型名称
+# SGLang 启动时默认的模型名通常是路径名或者是 "default"
+# 你可以通过访问 http://localhost:30000/v1/models 查看确切名字
+# 这里我们假设它叫 "default"，如果报错模型不存在，请修改这里
+MODEL_NAME = "default" 
+
+# ----------------------------------------
+
+def main():
+    print(f"正在连接 SGLang Server: {SERVER_URL} ...")
+
+    # 构建 model_args 字符串
+    model_args_str = (
+        f"model={MODEL_NAME},"          # 告诉 API 我要调哪个模型
+        f"base_url={SERVER_URL},"       # 服务器地址
+        "num_concurrent=50,"            # 并发请求数 (SGLang 吞吐高，可以开大，加速测评)
+        "max_retries=3,"                # 失败重试次数
+        "tokenized_requests=False"      # 必须设为 False，因为我们发的是纯文本 Prompt
+    )
+
+    # 开始测评
+    results = lm_eval.simple_evaluate(
+        # 核心：使用 "local-completions" 后端
+        # 这意味着 lm-eval 不会加载权重，而是把 input 发送给 API
+        model="local-completions", 
+        
+        model_args=model_args_str,
+        tasks=TASKS,
+        
+        # device 参数在这里无效，因为计算在 Server 端
+        # batch_size 参数在这里也无效，由 num_concurrent 控制并发
+    )
+
+    print("\n" + "="*50)
+    print("测评完成！结果如下：")
+    print("="*50)
+
+    # 打印格式化表格
+    if "results" in results:
+        print(utils.make_table(results))
     
-    print("--- 开始加载模型 ---")
-
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16
-
-    print(f"  - 正在从 '{model_path}' 加载 config.json...")
-    config = AutoConfig.from_pretrained(model_path)
-
-    print("  - 正在创建 SGLang Qwen2 模型架构...")
-    # 使用 with torch.device(device) 确保模型在创建时就在 GPU 上，避免额外的数据拷贝
-    with torch.device(device):
-        model = BitNetForCausalLM(config).to(dtype)
-
-    # 4. 加载权重文件到 CPU
-    weight_file = os.path.join(model_path, "model.safetensors")
-    print(f"  - 正在从 '{weight_file}' 加载权重...")
-    
-
-    state_dict = load_file(weight_file, device="cpu")
-
-    print("  - 正在将权重映射并加载到 SGLang 模型中...")
-
-    model.load_weights(state_dict.items())
-
-    print("\n--- 模型加载成功！ ---")
-    
-    # 打印一些信息以验证
-    print(f"模型已加载到设备: {model.device}")
-    num_params = sum(p.numel() for p in model.parameters())
-    print(f"模型总参数量: {num_params / 1e9:.2f}B") # 应该约等于 1.54B
-    
-    return model
+    # 也可以把结果保存到文件
+    with open("sglang_eval_results.json", "w", encoding="utf-8") as f:
+        json.dump(results["results"], f, indent=2, ensure_ascii=False)
+        print("\n详细结果已保存至 sglang_eval_results.json")
 
 if __name__ == "__main__":
-    hf_model_path = "/path/to/your/downloaded/Qwen2-1.5B-Instruct"
+    main()
     
-    if not os.path.exists(hf_model_path) or "Qwen2" not in hf_model_path:
-        print(f"错误：模型路径 '{hf_model_path}' 不存在或不正确。")
-        print("请下载 Qwen2-1.5B-Instruct 模型并更新路径。")
-    else:
-        sglang_model = load_hf_weights_into_sglang_model(hf_model_path)
-        
-        print("\n现在你可以将 'sglang_model' 用于 SGLang 的推理后端了。")
+    
+''' 
+python -m sglang.launch_server \
+    --model-path /path/to/your/model \
+    --port 30000 \
+    --host 0.0.0.0
+'''  

@@ -353,19 +353,19 @@ class ComplexNetAttention(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.total_num_heads = num_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
+        self.tp_size = get_tensor_model_parallel_world_size()
+        assert self.total_num_heads % self.tp_size == 0
+        self.num_heads = self.total_num_heads // self.tp_size
         self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
+        if self.total_num_kv_heads >= self.tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
+            assert self.total_num_kv_heads % self.tp_size == 0
         else:
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+            assert self.tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // self.tp_size)
         self.head_dim = hidden_size // num_heads   
         
         self.q_real_imag_size = self.head_dim * self.num_heads  *2
@@ -429,7 +429,8 @@ class ComplexNetAttention(nn.Module):
         
         attn_output_real_imag = self.attn(q,k,v,forward_batch)
         
-        attn_output_real_imag = all_gather(attn_output_real_imag, dim=-1)
+        if self.tp_size > 1:
+            attn_output_real_imag = all_gather(attn_output_real_imag, dim=-1)
         
         attn_normalized_real_imag = self.attn_layernorm(attn_output_real_imag)
         
