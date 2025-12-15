@@ -141,6 +141,7 @@ class BitNetAttention(nn.Module):
             self.total_num_kv_heads,
             bias= False,
             quant_config=quant_config,
+            gather_output=True,
             prefix=add_prefix("qk_proj",prefix),
         )
         self.o_proj = RowParallelLinear(

@@ -1,0 +1,93 @@
+{
+  "architectures": [
+    "Qwen2ForCausalLM"
+  ],
+  "attention_dropout": 0.0,
+  "bos_token_id": 151643,
+  "eos_token_id": 151645,
+  "hidden_act": "silu",
+  "hidden_size": 1536,
+  "initializer_range": 0.02,
+  "intermediate_size": 8960,
+  "max_position_embeddings": 32768,
+  "max_window_layers": 21,
+  "model_type": "qwen2",
+  "num_attention_heads": 12,
+  "num_hidden_layers": 28,
+  "num_key_value_heads": 2,
+  "rms_norm_eps": 1e-06,
+  "rope_theta": 1000000.0,
+"sliding_window": 32768,
+  "tie_word_embeddings": true,
+  "torch_dtype": "bfloat16",
+  "transformers_version": "4.43.1",
+  "use_cache": true,
+"use_sliding_window": false,
+  "vocab_size": 151936
+}
+
+
+https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/blob/main/model.safetensors
+
+Qwen2MLP：
+          input [batch,Seq,hidden_size]
+          Linear [hidden_size,2 * intermediate_size]   参数量：1536 * 8960 * 2 = 27 525 120
+          无偏置 
+          Linear [intermediate_size,hidden_size]       参数量：8960 * 1536 = 13 762 56
+          output[batch,Seq,hidden_size]
+                                                         
+          input [batch,Seq,hidden_size] ->gate,value[batch,Seq,2 * intermediate_size] (SwiGLU)-> [batch,Seq,intermediate_size] ->[batch,Seq,hidden_size]   总参数量：41 287 680
+
+
+
+Qwen2Attention：                                                      
+          "num_attention_heads": 12, "num_key_value_heads": 2,   
+          head_dim = hidden_size // self.total_num_heads = 1536 /12 = 128
+          self.scaling = self.head_dim**-0.5 = 0.088
+
+
+          input [batch,Seq,hidden_size]
+
+
+          Linear [hidden_size, head_dim*(num_attention_heads + 2 * num_key_value_heads)]  参数量 ： 1536 * 128 * 16 = 3 145 728                //qkv
+          偏置：  [head_dim*(num_attention_heads + 2 * num_key_value_heads)]   参数量：128 * 16 = 2048
+          o_proj [hidden_size,hidden_size] 参数量 ： （128*12） * （128*12） = 2 359 296
+
+
+          input[batch,Seq,hidden_size] -> qkv[batch,Seq,num_attention_heads],[batch,Seq,num_key_value_heads] (rotary) -> qkv[batch,Seq,num_attention_heads],[batch,Seq,num_key_value_heads] (attn)->[batch,Seq,hidden_size] (o_proj)->[batch,Seq,hidden_size]
+
+          总参数量 ： 5 507 072
+
+
+
+Qwen2DecoderLayer:
+          input_layernorm [hidden_size]     参数量 1536
+          post_attention_layernorm [hidden_size]     参数量 1536
+
+          attention  参数量 ： 5 507 072
+          mlp 参数量：41 287 680
+
+          input[batch,Seq,hidden_size] (rms)-> x,residual[[batch,Seq,hidden_size]] (attn) -> x,residual[[batch,Seq,hidden_size]] (rms) -> x,residual[[batch,Seq,hidden_size]] (mlp) ->x,residual[[batch,Seq,hidden_size]]
+
+          总参数量：46 797 824
+
+
+Qwen2Model：
+          norm [hidden_size]     参数量： 1536
+          embeding  [vocab_size,hidden_size]  参数量： 1536 * 151 936 = 233 373 696
+
+          input_ids (emb)-> input[batch,Seq,hidden_size] (lays * 28)-> input,residual[batch,Seq,hidden_size] (norm)-> input[batch,Seq,hidden_size] 
+
+          总参数量 ：1536 +  233 373 696 +  28*46 797 824 = 1 543 714 304
+
+
+
+ Qwen2ForCausalLM：
+          tie_word_embeddings 
+          input_ids[vocab_size] (emb)-> input[batch,Seq,hidden_size] (lays * 28)-> input,residual[batch,Seq,hidden_size]  -> input[batch,Seq,hidden_size] ->output[vocab_size]
+          总参数量： 1 543 714 304 
+
+
+
+
+

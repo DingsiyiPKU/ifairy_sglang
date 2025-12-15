@@ -101,4 +101,8 @@ x_real,x_imag -> x_real,x_imag
 
 x_real,x_imag -> ComplexUpLinear -> ComplexRelu2AndMul -> ComplexLinear
 
+## ComplexNetAttention
 
+### weight: [q_real,q_imag,k_real,k_imag,v_real,v_imag]
+
+x_real,x__imag -> x_real,x__imag

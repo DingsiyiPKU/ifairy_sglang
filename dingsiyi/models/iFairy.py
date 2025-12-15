@@ -1,14 +1,13 @@
 '''注意事项:
 1,linear,mlp层的参数名称不匹配,需要调整,注意参数的位置
 2,mlp层的tp逻辑可以优化（可选）
-3,cat过多
-4,共享tie embedding逻辑
-5,load_kv_cache_scales'''
+5,load_kv_cache_scales
+6，attn层分布式rms'''
 
 
 import logging
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
-
+from sglang.srt.distributed import all_gather
 import torch
 from torch import nn
 
@@ -60,13 +59,7 @@ def complex_relu2(x_real: torch.Tensor, x_imag: torch.Tensor) ->  Tuple[torch.Te
     return x_real, x_imag
 
 class ComplexRelu2AndMul(CustomOp):
-    def forward_native(self, x_real: torch.Tensor,x_imag: torch.Tensor) ->  Tuple[torch.Tensor,torch.Tensor]:
-        d = x_real.shape[-1] // 2
-        
-        
-        gate_real,up_real = x_real.split([d, d], dim=-1)
-        gate_imag,up_imag = x_imag.split([d, d], dim=-1)
-         
+    def forward_native(self, gate_real:torch.Tensor,gate_imag:torch.Tensor,up_real:torch.Tensor,up_imag:torch.Tensor) ->  Tuple[torch.Tensor,torch.Tensor]:
         gate_real,gate_imag = complex_relu2(gate_real,gate_imag)
         
         output_real = gate_real * up_real + gate_imag * up_imag
@@ -102,13 +95,18 @@ class ComplexRelu2AndMul(CustomOp):
         
         return output_real,output_imag
     
-def IntergrateRealAndImag(real_product: torch.Tensor,imag_product : torch.Tensor ,splite_dim :int) -> torch.Tensor:
+def IntergrateRealAndImag(real_product: torch.Tensor,imag_product : torch.Tensor ,splite_dim :int,
+                          need_split:bool = True ) -> Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor] :
+    
     r_r,r_i = real_product.split(splite_dim, dim=-1)
     i_r,i_i = imag_product.split(splite_dim, dim=-1)
-    output_real = r_r + i_i
-    output_imag = r_i - i_r
-    return output_real,output_imag  
-    
+    r_r.add_(i_i)
+    r_i.sub_(i_r)
+    if need_split:
+        return r_r,r_i
+    else:
+        return real_product
+        
     
     
 
@@ -219,7 +217,8 @@ class ComplexUpLinear(nn.Module):
             )
             
         
-    def forward(self, input_real:torch.Tensor,input_imag:torch.Tensor,) -> Tuple[torch.Tensor,torch.Tensor]:
+    def forward(self, input_real:torch.Tensor,
+                input_imag:torch.Tensor,) -> Tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
         assert input_real.size() == input_imag.size() ,"Shape mismatch"
         
         input_real_and_imag  = torch.cat([input_real, input_imag], dim=0) 
@@ -233,9 +232,7 @@ class ComplexUpLinear(nn.Module):
         Gate_real,Gate_imag = IntergrateRealAndImag(Gate_real_product, Gate_imag_product ,self.out_features//2)
         Up_real,Up_imag = IntergrateRealAndImag(Up_real_product, Up_imag_product ,self.out_features//2)
         
-        real = torch.cat([Gate_real, Up_real], dim=-1)
-        imag = torch.cat([Gate_imag, Up_imag], dim=-1)
-        return real,imag
+        return Gate_real,Gate_imag,Up_real,Up_imag
         
                 
 class ComplexQKVLinear(nn.Module):
@@ -245,9 +242,9 @@ class ComplexQKVLinear(nn.Module):
         self.total_num_kv_heads = total_num_kv_heads
         self.head_dim = head_dim
         self.hidden_size = head_dim * total_num_heads
-        self.q_real_imag_size = self.head_dim * self.num_heads  *2
+        self.q_real_imag_size = self.head_dim * self.total_num_heads  *2
         
-        self.kv_real_imag_size = self.head_dim * self.num_kv_heads *2
+        self.kv_real_imag_size = self.head_dim * self.total_num_kv_heads *2
         
         
         
@@ -261,7 +258,7 @@ class ComplexQKVLinear(nn.Module):
             prefix=add_prefix("qkv_proj", prefix),
         )
         
-    def forward(self, input_real: torch.Tensor,input_imag: torch.Tensor,) -> Tuple [torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
+    def forward(self, input_real: torch.Tensor,input_imag: torch.Tensor,) -> Tuple [torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
         assert input_real.size() == input_imag.size() ,"Shape mismatch"
         
         input_real_and_imag  = torch.cat([input_real, input_imag], dim=0) 
@@ -278,9 +275,9 @@ class ComplexQKVLinear(nn.Module):
         
         k_real,k_imag = IntergrateRealAndImag(k_real_product,k_imag_product,self.kv_real_imag_size//2)
 
-        v_real,v_imag = IntergrateRealAndImag(v_real_product,v_imag_product,self.kv_real_imag_size//2)
+        v_real_imag = IntergrateRealAndImag(v_real_product,v_imag_product,self.kv_real_imag_size//2,need_split=False)
         
-        return q_real,q_imag,k_real,k_imag,v_real,v_imag
+        return q_real,q_imag,k_real,k_imag,v_real_imag
         
 
 
@@ -329,9 +326,9 @@ class ComplexNetMLP(nn.Module):
         self.ffn_layernorm = ComplexNetRMSNorm(intermediate_size,eps=rms_norm_eps)
         
     def forward(self, x_real: torch.Tensor, x_imag: torch.Tensor) -> Tuple[torch.Tensor,torch.Tensor]:
-        gate_up_real,gate_up_imag = self.gate_up_proj(x_real,x_imag)
+        Gate_real,Gate_imag,Up_real,Up_imag = self.gate_up_proj(x_real,x_imag)
         
-        x_real,x_imag = self.act_fn(gate_up_real,gate_up_imag)
+        x_real,x_imag = self.act_fn(Gate_real,Gate_imag,Up_real,Up_imag)
         
         x_real,x_imag = self.ffn_layernorm(x_real,x_imag)
         
@@ -389,11 +386,11 @@ class ComplexNetAttention(nn.Module):
         )
         
     
-        self.out_proj = ComplexLinear(
-            in_features=self.head_dim * self.num_heads,
+        self.o_proj = ComplexLinear(
+            in_features=self.head_dim * self.total_num_heads,
             out_features=hidden_size,
             quant_config=quant_config,
-            prefix=add_prefix("out_proj", prefix),
+            prefix=add_prefix("o_proj", prefix),
         )
         
         
@@ -411,10 +408,10 @@ class ComplexNetAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             layer_id=layer_id,
             quant_config=quant_config,
-            prefix=add_prefix("radix_attention", prefix),
+            prefix=add_prefix("attn", prefix),
         )
         
-        self.attn_layernorm = ComplexNetRMSNorm(hidden_size,eps=rms_norm_eps)
+        self.attn_layernorm = RMSNorm(hidden_size * 2,eps=rms_norm_eps)
         
     def forward (
             self,
@@ -423,21 +420,22 @@ class ComplexNetAttention(nn.Module):
             hidden_states_imag: torch.Tensor,
             forward_batch: ForwardBatch,
         ) -> Tuple[torch.Tensor,torch.Tensor]:
-        q_real, k_real, v_real,q_imag, k_imag, v_imag= self.qkv_linear(hidden_states_real, hidden_states_imag)
+        q_real, q_imag, k_real,k_imag, v= self.qkv_linear(hidden_states_real, hidden_states_imag)
 
         q_rotated_real,q_rotated_imag,k_rotated_real,k_rotated_imag = self.rotary_emb(positions, q_real, q_imag, k_real, k_imag)
         
         q =torch.cat([q_rotated_real, q_rotated_imag], dim=-1)
         k =torch.cat([k_rotated_real, k_rotated_imag], dim=-1)
-        v =torch.cat([v_real, v_imag], dim=-1)
         
         attn_output_real_imag = self.attn(q,k,v,forward_batch)
         
-        attn_real,attn_imag = torch.chunk( attn_output_real_imag, 2, dim=-1)
+        attn_output_real_imag = all_gather(attn_output_real_imag, dim=-1)
         
-        attn_real,attn_imag = self.attn_layernorm(attn_real,attn_imag)
+        attn_normalized_real_imag = self.attn_layernorm(attn_output_real_imag)
         
-        output_real,output_imag = self.out_proj(attn_real,attn_imag)
+        attn_real,attn_imag = torch.chunk( attn_normalized_real_imag , 2, dim=-1)
+        
+        output_real,output_imag = self.o_proj(attn_real,attn_imag)
         
         return output_real,output_imag
     
