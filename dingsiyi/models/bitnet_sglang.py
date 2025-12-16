@@ -142,7 +142,7 @@ class BitNetAttention(nn.Module):
             bias= False,
             quant_config=quant_config,
             gather_output=True,
-            prefix=add_prefix("qk_proj",prefix),
+            prefix=add_prefix("qkv_proj",prefix),
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -245,7 +245,6 @@ class BitNetModel(nn.Model):
     def __init__(
         self,
         config:BitNetConfig,
-        layer_id:int = 0,
         quant_config:Optional[QuantizationConfig] = None,
         prefix :str = "",
          decoder_layer_type: type[nn.Module] =BitNetDecoderLayer,
@@ -287,7 +286,7 @@ class BitNetModel(nn.Model):
         if self.pp_group.is_last_rank:
             self.norm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
         else:
-            self,norm = PPMissingLayer()
+            self.norm = PPMissingLayer()
         
         
     def get_input_embedding(self,inputs_ids:torch.Tensor) -> torch.Tensor:
@@ -340,7 +339,7 @@ class BitNetModel(nn.Model):
             )
             
         else:
-            hidden_states = self.norm(hidden_states,residual)    
+            hidden_states,_ = self.norm(hidden_states,residual)    
             return hidden_states
         
         

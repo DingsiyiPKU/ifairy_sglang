@@ -557,7 +557,7 @@ class ComplexNetLMBase(nn.Module):
                 prefix=prefix,
             ),
             pp_rank=self.pp_group.rank_in_group,
-            pp_size=self.pp_group.size,
+            pp_size=self.pp_group.world_size,
             prefix=add_prefix("layer", prefix),
         ),
         
