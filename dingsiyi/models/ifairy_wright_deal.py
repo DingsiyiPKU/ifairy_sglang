@@ -22,9 +22,8 @@ def main():
         new_state_dict = {}
         
         # 遍历所有权重
-        for name, tensor in state_dict.items():
-            
-            if name.endswith(real):
+        for name, tensor in state_dict.items():           
+            if name.endswith(real) :
                 real_tensor = tensor
                 
                 base_name = name[:-len]

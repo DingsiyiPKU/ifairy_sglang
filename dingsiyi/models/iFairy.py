@@ -166,11 +166,11 @@ class ComplexNetRMSNorm(nn.Module):
             normalized_x,residual = self.weight_real_imag(x, residual)
             hidden_states_real,hidden_states_imag = torch.chunk(normalized_x, 2, dim=-1)
             residual_real,residual_imag = torch.chunk(residual, 2, dim=-1)
-            return hidden_states_real,hidden_states_imag,residual_real,residual_imag
+            return sqrt(0.5)*hidden_states_real,sqrt(0.5)*hidden_states_imag,residual_real,residual_imag
         else:
             normalized_x = self.weight_real_imag(x)
             hidden_states_real,hidden_states_imag = torch.chunk(normalized_x, 2, dim=-1)
-            return hidden_states_real,hidden_states_imag
+            return sqrt(0.5)*hidden_states_real,sqrt(0.5)*hidden_states_imag
     
     
 
@@ -209,7 +209,7 @@ class ComplexUpLinear(nn.Module):
         self.out_features = out_features
         self.weight_real_and_imag = MergedColumnParallelLinear(
                 hidden_size = in_features,
-                output_sizes=[out_features, out_features],
+                output_sizes=[out_features *2, out_features * 2],
                 bias= False,
                 quant_config=quant_config,
                 gather_output=True,
@@ -226,11 +226,11 @@ class ComplexUpLinear(nn.Module):
         
         real_product, imag_product =  torch.chunk(Merged_output, 2, dim=0)
         
-        Gate_real_product,Up_real_product = real_product.split(self.out_features, dim=-1)
-        Gate_imag_product,Up_imag_product = imag_product.split(self.out_features, dim=-1)
+        Gate_real_product,Up_real_product = real_product.split(self.out_features * 2, dim=-1)
+        Gate_imag_product,Up_imag_product = imag_product.split(self.out_features * 2, dim=-1)
         
-        Gate_real,Gate_imag = IntergrateRealAndImag(Gate_real_product, Gate_imag_product ,self.out_features//2)
-        Up_real,Up_imag = IntergrateRealAndImag(Up_real_product, Up_imag_product ,self.out_features//2)
+        Gate_real,Gate_imag = IntergrateRealAndImag(Gate_real_product, Gate_imag_product ,self.out_features)
+        Up_real,Up_imag = IntergrateRealAndImag(Up_real_product, Up_imag_product ,self.out_features)
         
         return Gate_real,Gate_imag,Up_real,Up_imag
         
@@ -303,7 +303,7 @@ class ComplexNetMLP(nn.Module):
         super().__init__()
         self.gate_up_proj = ComplexUpLinear(
             hidden_size,
-            intermediate_size * 2,
+            intermediate_size,
             quant_config=quant_config,
             prefix=add_prefix("gate_up_proj", prefix),
         )
@@ -495,7 +495,7 @@ class  ComplexNetDecoderLayer(nn.Module):
         else:
             hidden_states_real,hidden_states_imag,residual_real,residual_imag = self.input_layernorm(hidden_states_real,hidden_states_imag,residual_real,residual_imag)
         
-        hidden_states_imag,hidden_states_real = self.self_attn(
+        hidden_states_real,hidden_states_imag = self.self_attn(
             positions=positions,
             hidden_states_real=hidden_states_real,
             hidden_states_imag=hidden_states_imag,
@@ -503,7 +503,7 @@ class  ComplexNetDecoderLayer(nn.Module):
         )
         
         hidden_states_real,hidden_states_imag,residual_real,residual_imag = self.post_attention_layernorm(hidden_states_real,hidden_states_imag,residual_real,residual_imag)
-        hidden_states_imag,hidden_states_real = self.mlp(
+        hidden_states_real,hidden_states_imag = self.mlp(
             hidden_states_real,
             hidden_states_imag,
         )
@@ -593,14 +593,17 @@ class ComplexNetLMBase(nn.Module):
             else:
                 hidden_state_real = input_embeds_real
                 hidden_state_imag = input_embeds_imag
+            residual_real = None
+            residual_imag = None
+                
         else:
             assert pp_proxy_tensors is not None, "PPProxyTensors must be provided for non-first PP ranks."
-            hidden_state_real = pp_proxy_tensors[hidden_state_real]
-            hidden_state_imag = pp_proxy_tensors[hidden_state_imag]
-            residual_real = pp_proxy_tensors[residual_real]
-            residual_imag = pp_proxy_tensors[residual_imag]
+            hidden_state_real = pp_proxy_tensors["hidden_state_real"]
+            hidden_state_imag = pp_proxy_tensors["hidden_state_imag"]
+            residual_real = pp_proxy_tensors["residual_real"]
+            residual_imag = pp_proxy_tensors["residual_imag"]
             
-        for i in range(self.start_layers,self.end_layer):
+        for i in range(self.start_layer,self.end_layer):
             layer = self.layer[i]
             hidden_state_real,hidden_state_imag, residual_real, residual_imag = layer(
                 positions=positions,
@@ -613,15 +616,17 @@ class ComplexNetLMBase(nn.Module):
             
         if not self.pp_group.is_last.rank:
             return PPProxyTensors(
-                hidden_state_real=hidden_state_real,
-                hidden_state_imag=hidden_state_imag,
-                residual_real=residual_real,
-                residual_imag=residual_imag,
+                {
+                "hidden_state_real":hidden_state_real,
+                "hidden_state_imag":hidden_state_imag,
+                "residual_real":residual_real,
+                "residual_imag":residual_imag,
+                }
             )
             
             
         else:
-            hidden_state_real,hidden_state_imag = self.final_norm(hidden_state_real,hidden_state_imag,residual_real,residual_imag)
+            hidden_state_real,hidden_state_imag,_,__ = self.final_norm(hidden_state_real,hidden_state_imag,residual_real,residual_imag)
             hidden_state = torch.cat([hidden_state_real, hidden_state_imag], dim=-1)
             return hidden_state
         
@@ -635,7 +640,7 @@ class ComplexNetLMBase(nn.Module):
             self.config.num_hidden_layers,
             self.config.__class__.model_type,
         ):
-            if not isinstance(self.layers[layer_idx], nn.Identity):
+            if not isinstance(self.layer[layer_idx], nn.Identity):
                 layer_self_attn = self.layers[layer_idx].self_attn
             if hasattr(layer_self_attn.attn, "k_scale"):
                 layer_self_attn.attn.k_scale = scaling_factor
@@ -648,23 +653,23 @@ class ComplexNetLMBase(nn.Module):
                 
 
 class ComplexNetLM(nn.Module):       
-    # default_bitsandbytes_target_modules = [
-    #     ".gate_proj.",
-    #     ".down_proj.",
-    #     ".up_proj.",
-    #     ".q_proj.",
-    #     ".k_proj.",
-    #     ".v_proj.",
-    #     ".o_proj.",
-    # ]
-    # bitsandbytes_stacked_params_mapping = {
-    #     # shard_name, weight_name, index
-    #     "q_proj": ("qkv_proj", 0),
-    #     "k_proj": ("qkv_proj", 1),
-    #     "v_proj": ("qkv_proj", 2),
-    #     "gate_proj": ("gate_up_proj", 0),
-    #     "up_proj": ("gate_up_proj", 1),
-    # }
+    default_bitsandbytes_target_modules = [
+         ".gate_proj.",
+         ".down_proj.",
+         ".up_proj.",
+         ".q_proj.",
+         ".k_proj.",
+         ".v_proj.",
+         ".o_proj.",
+     ]
+    bitsandbytes_stacked_params_mapping = {
+         # shard_name, weight_name, index
+         "q_proj": ("qkv_proj", 0),
+         "k_proj": ("qkv_proj", 1),
+         "v_proj": ("qkv_proj", 2),
+         "gate_proj": ("gate_up_proj", 0),
+         "up_proj": ("gate_up_proj", 1),
+     }
 
     
     
@@ -687,10 +692,10 @@ class ComplexNetLM(nn.Module):
             decoder_layer_type=ComplexNetDecoderLayer,
         )
     
-        if self.pp_group.is_last.rank:    
+        if self.pp_group.is_last_rank:   
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
-                config.hidden_size,
+                config.hidden_size * 2,
                 prefix="lm_head",
         )
 
