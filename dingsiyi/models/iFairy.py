@@ -372,7 +372,7 @@ class ComplexNetAttention(nn.Module):
         
         self.kv_real_imag_size = self.head_dim * self.num_kv_heads *2
         
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = (self.head_dim) ** -0.5
         
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
@@ -429,10 +429,14 @@ class ComplexNetAttention(nn.Module):
         
         attn_output_real_imag = self.attn(q,k,v,forward_batch)
         
+        
+        
         if self.tp_size > 1:
             attn_output_real_imag = all_gather(attn_output_real_imag, dim=-1)
         
         attn_normalized_real_imag = self.attn_layernorm(attn_output_real_imag)
+        
+        attn_normalized_real_imag = attn_normalized_real_imag * sqrt(0.5)
         
         attn_real,attn_imag = torch.chunk( attn_normalized_real_imag , 2, dim=-1)
         
@@ -472,8 +476,8 @@ class  ComplexNetDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("mlp", prefix),
         )
-        self.input_layernorm = ComplexNetRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = ComplexNetRMSNorm(
+        self.pre_layernorm = ComplexNetRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_layernorm = ComplexNetRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )       
         
@@ -490,10 +494,10 @@ class  ComplexNetDecoderLayer(nn.Module):
         if  residual_real is None and residual_imag is None:
             residual_real = hidden_states_real
             residual_imag = hidden_states_imag
-            hidden_states_real,hidden_states_imag = self.input_layernorm(hidden_states_real,hidden_states_imag)
+            hidden_states_real,hidden_states_imag = self.pre_layernorm(hidden_states_real,hidden_states_imag)
 
         else:
-            hidden_states_real,hidden_states_imag,residual_real,residual_imag = self.input_layernorm(hidden_states_real,hidden_states_imag,residual_real,residual_imag)
+            hidden_states_real,hidden_states_imag,residual_real,residual_imag = self.pre_layernorm(hidden_states_real,hidden_states_imag,residual_real,residual_imag)
         
         hidden_states_real,hidden_states_imag = self.self_attn(
             positions=positions,
@@ -502,7 +506,7 @@ class  ComplexNetDecoderLayer(nn.Module):
             forward_batch=forward_batch,
         )
         
-        hidden_states_real,hidden_states_imag,residual_real,residual_imag = self.post_attention_layernorm(hidden_states_real,hidden_states_imag,residual_real,residual_imag)
+        hidden_states_real,hidden_states_imag,residual_real,residual_imag = self.post_layernorm(hidden_states_real,hidden_states_imag,residual_real,residual_imag)
         hidden_states_real,hidden_states_imag = self.mlp(
             hidden_states_real,
             hidden_states_imag,
