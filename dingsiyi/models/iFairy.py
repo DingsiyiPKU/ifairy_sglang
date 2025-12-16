@@ -5,6 +5,8 @@
 6，attn层分布式rms'''
 
 
+'''使用时注意：将config文件中hidden_size 数值变为原来的两倍，不然kv cache不正常'''
+
 import logging
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
 from sglang.srt.distributed import all_gather
