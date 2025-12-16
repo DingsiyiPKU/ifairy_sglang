@@ -181,7 +181,7 @@ class ComplexLinear(nn.Module):
         self.out_features = out_features
 
         self.weight_real_and_imag = RowParallelLinear(
-                hidden_size = in_features ,
+                input_size = in_features ,
                 output_size= out_features * 2,
                 bias= False,
                 quant_config=quant_config,
@@ -193,7 +193,7 @@ class ComplexLinear(nn.Module):
         assert input_real.size() == input_imag.size() ,"Shape mismatch"
         
         input_real_and_imag  = torch.cat([input_real, input_imag], dim=0) 
-        Merged_output  = self.weight_real_and_imag(input_real_and_imag)
+        Merged_output,_  = self.weight_real_and_imag(input_real_and_imag)
         
         real_product, imag_product =  torch.chunk(Merged_output, 2, dim=0)
         
@@ -208,7 +208,7 @@ class ComplexUpLinear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.weight_real_and_imag = MergedColumnParallelLinear(
-                hidden_size = in_features,
+                input_size= in_features,
                 output_sizes=[out_features *2, out_features * 2],
                 bias= False,
                 quant_config=quant_config,
@@ -222,7 +222,7 @@ class ComplexUpLinear(nn.Module):
         assert input_real.size() == input_imag.size() ,"Shape mismatch"
         
         input_real_and_imag  = torch.cat([input_real, input_imag], dim=0) 
-        Merged_output  = self.weight_real_and_imag(input_real_and_imag)
+        Merged_output,_  = self.weight_real_and_imag(input_real_and_imag)
         
         real_product, imag_product =  torch.chunk(Merged_output, 2, dim=0)
         
@@ -262,7 +262,7 @@ class ComplexQKVLinear(nn.Module):
         assert input_real.size() == input_imag.size() ,"Shape mismatch"
         
         input_real_and_imag  = torch.cat([input_real, input_imag], dim=0) 
-        Merged_qkv  = self.qkv_linear(input_real_and_imag)  
+        Merged_qkv,_  = self.qkv_linear(input_real_and_imag)  
         qkv_real_product,qkv_imag_product = torch.chunk(Merged_qkv, 2, dim=0) 
         q_real_product, k_real_product, v_real_product = qkv_real_product.split(
             [self.q_real_imag_size, self.kv_real_imag_size, self.kv_real_imag_size], dim=-1
@@ -489,7 +489,7 @@ class  ComplexNetDecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual_real: Optional[torch.Tensor],
         residual_imag: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor,torch.Tensor]:
+    ) -> Tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
         # Self Attention
         if  residual_real is None and residual_imag is None:
             residual_real = hidden_states_real
@@ -550,8 +550,8 @@ class ComplexNetLMBase(nn.Module):
         
         self.layer,self.start_layer,self.end_layer = make_layers( 
             config.num_hidden_layers,
-            lambda ids,prefix: decoder_layer_type(
-                layer_id = ids,
+            lambda idx,prefix: decoder_layer_type(
+                layer_id = idx,
                 config=config,
                 quant_config=quant_config,
                 prefix=prefix,
@@ -559,7 +559,7 @@ class ComplexNetLMBase(nn.Module):
             pp_rank=self.pp_group.rank_in_group,
             pp_size=self.pp_group.world_size,
             prefix=add_prefix("layer", prefix),
-        ),
+        )
         
         if self.pp_group.is_last.rank:
             self.final_norm = ComplexNetRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -688,9 +688,12 @@ class ComplexNetLM(nn.Module):
         self.pp_group = get_pp_group()
         self.config = config
         self.quant_config = quant_config
+        
+        
+        self.config.hidden_size = self.config.hidden_size // 2
     
         self.model = ComplexNetLMBase(
-            config=config,
+            config=self.config,
             quant_config=quant_config,
             prefix=prefix,
             decoder_layer_type=ComplexNetDecoderLayer,
@@ -699,7 +702,7 @@ class ComplexNetLM(nn.Module):
         if self.pp_group.is_last_rank:   
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
-                config.hidden_size * 2,
+                self.config.hidden_size * 2,
                 prefix="lm_head",
         )
 
@@ -707,7 +710,7 @@ class ComplexNetLM(nn.Module):
             self.lm_head = PPMissingLayer()
     
         
-        self.logits_processor = LogitsProcessor(config)
+        self.logits_processor = LogitsProcessor(self.config)
         self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
     
     
@@ -815,18 +818,6 @@ class ComplexNetLM(nn.Module):
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
-                continue
-            if self.config.tie_word_embeddings and "lm_head.weight" in name:
-                if self.pp_group.world_size > 1 and self.pp_group.is_last_rank:
-                    # Handle pp weight tying here
-                    # find the embed_tokens.weight in the weights
-                    embed_token_weights = next(
-                        filter(lambda x: x[0] == "model.embed_tokens.weight", weights)
-                    )[1]
-                    loaded_weight = embed_token_weights
-                else:
-                    continue
-            if name.startswith("model.vision_tower") and name not in params_dict:
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
